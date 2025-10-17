@@ -4,3 +4,4 @@ nltk
 pandas
 mysql-connector-python
 scikit-learn
+matplotlib

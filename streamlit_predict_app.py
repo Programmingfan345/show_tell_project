@@ -16,11 +16,34 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 # python -m streamlit run streamlit_predict_app.py
 
 nltk.download("punkt")
-
 nltk.download("punkt_tab")
 
-EMAIL_ADDRESS = "studentfeedbacks44@gmail.com"
-EMAIL_PASSWORD = "fhwezznkcxmxfxdo"
+# EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS") or st.secrets.get("EMAIL_ADDRESS")
+# EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD") or st.secrets.get("EMAIL_PASSWORD")
+
+def get_secret(name: str):
+    v = os.getenv(name)
+    if v:
+        return v
+    try:
+        return st.secrets[name]
+    except Exception:
+        return None
+
+EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
+EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
+
+if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (16-char Gmail App Password) via env vars or .streamlit/secrets.toml.")
+    st.stop()
+
+# EMAIL_ADDRESS = "studentfeedbacks44@gmail.com"
+# EMAIL_PASSWORD = "blueFire123#"
+# EMAIL_PASSWORD = "fhwezznkcxmxfxdo"
+#smtpbrzzAGP#$563
+#slonrzTBAu5641$#
+#omfl otsv sdqr qjos
+#uxkb crgw sbsx jjrh
 
 # --- Load model & vectorizer ---
 def load_model_and_vectorizer():
@@ -41,16 +64,30 @@ def predict_sentences(sentences, model, vectorizer):
 def get_db_connection():
     try:
         return mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="slothFace@48",
-            # password="Vigi@2004",
-            database="Showtell",
-            port=3306
+            host=st.secrets["DB_HOST"],
+            port=int(st.secrets["DB_PORT"]),
+            database=st.secrets["DB_NAME"],
+            user=st.secrets["DB_USER"],
+            password=st.secrets["DB_PASSWORD"],
+            # later (recommended): ssl_ca="C:/path/to/rds-combined-ca-bundle.pem"
         )
     except mysql.connector.Error as err:
-        print("Database Connection Error:", err)
+        st.error(f"Database Connection Error: {err}")
         return None
+
+# def get_db_connection():
+#     try:
+#         return mysql.connector.connect(
+#             host="localhost",
+#             user="root",
+#             password="slothFace@48",
+#             # password="Vigi@2004",
+#             database="Showtell",
+#             port=3306
+#         )
+#     except mysql.connector.Error as err:
+#         print("Database Connection Error:", err)
+#         return None
 
 # --- Insert into database
 def insert_student_data(student_name, email, title, story, total, show, tell, reflection, comments):
@@ -71,6 +108,22 @@ def insert_student_data(student_name, email, title, story, total, show, tell, re
     except mysql.connector.Error as err:
         print("⚠️ MySQL Error:", err)
 
+def count_rows():
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM student_inputs;")
+        n = cur.fetchone()[0]
+        return n
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except:
+            pass
+
 # --- Send feedback email
 def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment):
     changed = sum(1 for item in feedback_list if not item["agree"])
@@ -79,13 +132,13 @@ def send_feedback_email(email, student_name, title, summary, feedback_list, refl
         status = "✅ Agreed" if item["agree"] else "❌ Did NOT agree"
         sentence_feedback += f"- [{item['label']}] {item['sentence']}\n  ➤ {status}\n\n"
 
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = f"📊 Feedback for Your Data Story: {title}"
-        msg["From"] = EMAIL_ADDRESS
-        msg["To"] = email
-
-        msg.set_content(f"""
+    # 1) Build the message
+    msg = EmailMessage()
+    msg["Subject"] = f"📊 Feedback for Your Data Story: {title}"
+    msg["From"] = EMAIL_ADDRESS          # must match the authenticated Gmail
+    msg["To"] = email
+    msg["Reply-To"] = EMAIL_ADDRESS
+    msg.set_content(f"""
 Dear {student_name},
 
 Thank you for submitting your data story titled "{title}". Our system analyzed your submission and identified a total of {summary["total_sentences"]} sentences. Of these, {summary["show_sentences"]} were categorized as 'Show' and {summary["tell_sentences"]} as 'Tell'. You disagreed with the model's classification on {changed} sentence(s).
@@ -102,15 +155,23 @@ Your reflection:
 
 We appreciate your thoughtful participation and hope this feedback helps you enhance your data storytelling skills.
 
-Best regards,  
+Best regards,
 The Data Story Feedback Team
 """)
 
+    # 2) Send it
+    try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)  # 16-char Gmail App Password
             smtp.send_message(msg)
+        st.success(f"✅ Email sent to {email}")
+    except smtplib.SMTPAuthenticationError as e:
+        st.error("❌ Gmail auth failed. Double-check the 16-char App Password (no spaces).")
+        st.exception(e)
     except Exception as e:
-        print(f"Email error: {e}")
+        st.error("❌ Failed to send email.")
+        st.exception(e)
+
 
 # --- Streamlit UI ---
 st.title("✨ Show or Tell Prediction App ✨")

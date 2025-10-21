@@ -8,15 +8,19 @@ import matplotlib.pyplot as plt
 from email.message import EmailMessage
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# -------------------------
+# =========================
 # NLTK
-# -------------------------
+# =========================
 nltk.download("punkt")
-nltk.download("punkt_tab")  # harmless if not present
+# harmless if not present; remove if you don't use it
+try:
+    nltk.download("punkt_tab")
+except:
+    pass
 
-# -------------------------
+# =========================
 # Secrets helper
-# -------------------------
+# =========================
 def get_secret(name: str):
     v = os.getenv(name)
     if v:
@@ -29,12 +33,12 @@ def get_secret(name: str):
 EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
 EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (16-char Gmail App Password) via env vars or .streamlit/secrets.toml.")
+    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) via env vars or .streamlit/secrets.toml.")
     st.stop()
 
-# -------------------------
+# =========================
 # Model + Vectorizer
-# -------------------------
+# =========================
 def load_model_and_vectorizer():
     try:
         model = joblib.load("LogisticRegression_All_shots_data_model.pkl")
@@ -48,17 +52,17 @@ def predict_sentences(sentences, model, vectorizer):
     tokens = [" ".join(nltk.word_tokenize(s.lower())) for s in sentences]
     return model.predict(vectorizer.transform(tokens))
 
-# -------------------------
-# DB
-# -------------------------
+# =========================
+# DB helpers
+# =========================
 def get_db_connection():
     try:
         return mysql.connector.connect(
-            host=st.secrets["DB_HOST"],
-            port=int(st.secrets["DB_PORT"]),
-            database=st.secrets["DB_NAME"],
-            user=st.secrets["DB_USER"],
-            password=st.secrets["DB_PASSWORD"],
+            host=get_secret("DB_HOST"),
+            port=int(get_secret("DB_PORT")),
+            database=get_secret("DB_NAME"),
+            user=get_secret("DB_USER"),
+            password=get_secret("DB_PASSWORD"),
             autocommit=False,
         )
     except mysql.connector.Error as err:
@@ -72,8 +76,7 @@ def get_or_create_student(full_name: str, email: str):
         return None
     try:
         cur = conn.cursor()
-        # normalize email to lowercase; triggers also enforce this
-        email_l = email.strip().lower()
+        email_l = (email or "").strip().lower()
         cur.execute(
             """
             INSERT INTO students (full_name, email)
@@ -82,12 +85,12 @@ def get_or_create_student(full_name: str, email: str):
             """,
             (full_name.strip(), email_l)
         )
-        # If inserted, lastrowid will be set; if updated, lastrowid can be 0 -> select id.
         if cur.lastrowid:
             student_id = cur.lastrowid
         else:
             cur.execute("SELECT student_id FROM students WHERE email = %s", (email_l,))
-            student_id = cur.fetchone()[0]
+            row = cur.fetchone()
+            student_id = row[0] if row else None
         conn.commit()
         return student_id
     except mysql.connector.Error as err:
@@ -101,13 +104,13 @@ def get_or_create_student(full_name: str, email: str):
             pass
 
 def get_or_create_week(week_number: int, label: str | None = None):
-    """Return weeks.week_id, creating the row if needed (week_number is unique)."""
+    """Return weeks.week_id, creating the row if needed."""
     conn = get_db_connection()
     if not conn:
         return None
     try:
         cur = conn.cursor()
-        lbl = label if label else f"Week {week_number}"
+        lbl = label if label else f"Week {int(week_number)}"
         cur.execute(
             """
             INSERT INTO weeks (week_number, label)
@@ -120,7 +123,8 @@ def get_or_create_week(week_number: int, label: str | None = None):
             week_id = cur.lastrowid
         else:
             cur.execute("SELECT week_id FROM weeks WHERE week_number = %s", (int(week_number),))
-            week_id = cur.fetchone()[0]
+            row = cur.fetchone()
+            week_id = row[0] if row else None
         conn.commit()
         return week_id
     except mysql.connector.Error as err:
@@ -142,8 +146,7 @@ def insert_submission_and_sentences(
 ):
     """
     Inserts one row into student_inputs (with student_id & week_id),
-    then all related student_sentences rows (also with week_id).
-    Returns input_id on success.
+    then all related student_sentences rows (also with week_id). Returns input_id.
     """
     conn = get_db_connection()
     if not conn:
@@ -196,9 +199,9 @@ def insert_submission_and_sentences(
         except Exception:
             pass
 
-# -------------------------
+# =========================
 # Email
-# -------------------------
+# =========================
 def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment,
                         agreed_show, agreed_tell, disagreed_show, disagreed_tell):
     changed = sum(1 for item in feedback_list if not item["agree"])
@@ -249,14 +252,49 @@ The Data Story Feedback Team
         st.error("❌ Failed to send email.")
         st.exception(e)
 
-# -------------------------
+# =========================
 # UI
-# -------------------------
+# =========================
 st.title("✨ Show or Tell Prediction App ✨")
 st.markdown("### Data Story Prompt")
 st.image("chart_prompt.png", caption="Use this chart to write your data story.")
 st.write("---")
 
+# ---------- Admin-only week control ----------
+DEFAULT_WEEK = 5
+CURRENT_WEEK_DEFAULT = int(os.getenv("CURRENT_WEEK") or get_secret("CURRENT_WEEK") or DEFAULT_WEEK)
+
+# store week once
+if "week_number" not in st.session_state:
+    st.session_state.week_number = CURRENT_WEEK_DEFAULT
+
+# sidebar admin gate
+with st.sidebar:
+    st.subheader("Admin")
+    admin_ok = st.session_state.get("admin_ok", False)
+    admin_key = st.text_input("Admin key", type="password", placeholder="Enter key to unlock")
+    if st.button("Unlock"):
+        if admin_key and admin_key == get_secret("ADMIN_KEY"):
+            st.session_state.admin_ok = True
+            st.success("Admin unlocked")
+        else:
+            st.error("Invalid key")
+
+# main area: week shown read-only unless admin
+if st.session_state.get("admin_ok"):
+    st.session_state.week_number = st.number_input(
+        "Week number (admin)",
+        min_value=1, max_value=52,
+        value=int(st.session_state.week_number),
+        step=1
+    )
+else:
+    st.markdown(f"**Week:** {int(st.session_state.week_number)}")
+    # Alternative if you prefer the same widget but disabled:
+    # st.number_input("Week number", min_value=1, max_value=52,
+    #                 value=int(st.session_state.week_number), step=1, disabled=True)
+
+# ---------- Page routing ----------
 if "page" not in st.session_state:
     st.session_state.page = "input"
 if "analysis_done" not in st.session_state:
@@ -267,7 +305,6 @@ if st.session_state.page == "input":
     student_name = st.text_input("Enter your name:")
     email = st.text_input("Enter your email:")
     title = st.text_input("Enter a title for your data story:")
-    week_number = st.number_input("Week number", min_value=1, max_value=52, value=5, step=1)  # NEW
     input_text = st.text_area("Write your data story here:")
     stories = [input_text.strip()] if input_text.strip() else []
 
@@ -280,7 +317,6 @@ if st.session_state.page == "input":
             st.session_state.student_name = student_name
             st.session_state.student_email = email
             st.session_state.story_title = title
-            st.session_state.week_number = int(week_number)
 
 # RESULTS
 if st.session_state.page == "results":
@@ -288,7 +324,8 @@ if st.session_state.page == "results":
     name = st.session_state.student_name
     email_addr = st.session_state.student_email
     story_title = st.session_state.story_title
-    week_number = st.session_state.week_number
+    week_number = int(st.session_state.week_number)
+
     model, vectorizer = load_model_and_vectorizer()
 
     if not st.session_state.analysis_done:
@@ -335,9 +372,6 @@ if st.session_state.page == "results":
         st.session_state.disagreed_show = disagreed_show
         st.session_state.disagreed_tell = disagreed_tell
 
-        st.markdown("## Comment")
-        st.session_state.common_reason = st.text_area("Add your thoughts or reasons for disagreement")
-
         st.markdown("## Summary")
         st.write(f"Week: {week_number}")
         st.write(f"Total Sentences: {total}")
@@ -347,10 +381,13 @@ if st.session_state.page == "results":
         st.write(f"✔️ Agreed (Tell): {agreed_tell}")
 
         fig, ax = plt.subplots()
-        ax.bar(["Show", "Tell"], [show, tell], color=["green", "red"])
+        ax.bar(["Show", "Tell"], [show, tell])  # no explicit colors -> matplotlib default
         ax.set_ylabel("Number of Sentences")
         ax.set_title("Show vs Tell Breakdown")
         st.pyplot(fig)
+
+        st.markdown("## Comment")
+        st.session_state.common_reason = st.text_area("Add your thoughts or reasons for disagreement")
 
         if st.button("Next: Reflection & Email"):
             st.session_state.analysis_done = True
@@ -367,9 +404,9 @@ if st.session_state.page == "results":
                 "tell_sentences": st.session_state.tell_sentences,
             }
 
-            # Get or create identities
+            # Resolve identities
             student_id = get_or_create_student(name, email_addr)
-            week_id = get_or_create_week(st.session_state.week_number)
+            week_id = get_or_create_week(week_number)
             if not student_id or not week_id:
                 st.error("Could not resolve student/week. Aborting save.")
             else:
@@ -395,7 +432,7 @@ if st.session_state.page == "results":
                         st.session_state.disagreed_show,
                         st.session_state.disagreed_tell
                     )
-                    st.success(f" Feedback submitted (input_id={input_id}, week_id={week_id}) and email sent!")
+                    st.success(f" Feedback submitted (input_id={input_id}, week={week_number}) and email sent!")
                 else:
                     st.error("Could not save submission. Email not sent.")
 

@@ -12,9 +12,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 # NLTK
 # =========================
 nltk.download("punkt")
-# harmless if not present; remove if you don't use it
 try:
-    nltk.download("punkt_tab")
+    nltk.download("punkt_tab")  # harmless if missing
 except:
     pass
 
@@ -33,7 +32,7 @@ def get_secret(name: str):
 EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
 EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) via env vars or .streamlit/secrets.toml.")
+    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in env or .streamlit/secrets.toml.")
     st.stop()
 
 # =========================
@@ -70,7 +69,7 @@ def get_db_connection():
         return None
 
 def get_or_create_student(full_name: str, email: str):
-    """Return students.student_id, creating the row if needed (email is unique)."""
+    """Return students.student_id, creating the row if needed (email unique)."""
     conn = get_db_connection()
     if not conn:
         return None
@@ -88,7 +87,7 @@ def get_or_create_student(full_name: str, email: str):
         if cur.lastrowid:
             student_id = cur.lastrowid
         else:
-            cur.execute("SELECT student_id FROM students WHERE email = %s", (email_l,))
+            cur.execute("SELECT student_id FROM students WHERE email=%s", (email_l,))
             row = cur.fetchone()
             student_id = row[0] if row else None
         conn.commit()
@@ -104,7 +103,7 @@ def get_or_create_student(full_name: str, email: str):
             pass
 
 def get_or_create_week(week_number: int, label: str | None = None):
-    """Return weeks.week_id, creating the row if needed."""
+    """Return weeks.week_id, creating the row if needed (week_number unique)."""
     conn = get_db_connection()
     if not conn:
         return None
@@ -122,7 +121,7 @@ def get_or_create_week(week_number: int, label: str | None = None):
         if cur.lastrowid:
             week_id = cur.lastrowid
         else:
-            cur.execute("SELECT week_id FROM weeks WHERE week_number = %s", (int(week_number),))
+            cur.execute("SELECT week_id FROM weeks WHERE week_number=%s", (int(week_number),))
             row = cur.fetchone()
             week_id = row[0] if row else None
         conn.commit()
@@ -137,54 +136,68 @@ def get_or_create_week(week_number: int, label: str | None = None):
         except Exception:
             pass
 
+def has_existing_submission(student_id: int, week_id: int) -> bool:
+    """True if this student already has a submission for this week."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM student_inputs WHERE student_id=%s AND week_id=%s LIMIT 1",
+            (student_id, week_id),
+        )
+        return cur.fetchone() is not None
+    except mysql.connector.Error as err:
+        st.error(f"DB error checking existing submission: {err}")
+        return False
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
 def insert_submission_and_sentences(
     student_id, week_id,
     student_name, email, title, story,
     total, show, tell, reflection, comments,
-    agreed_show, agreed_tell, disagreed_show, disagreed_tell,
-    sentence_rows  # list of tuples: (sentence_idx, sentence_text, model_label, student_agree_int)
+    sentence_rows  # list of (sentence_idx, sentence_text, model_label, student_agree_int)
 ):
-    """
-    Inserts one row into student_inputs (with student_id & week_id),
-    then all related student_sentences rows (also with week_id). Returns input_id.
-    """
+    """Insert one parent row + all sentence rows. Assumes caller has already checked no existing submission."""
     conn = get_db_connection()
     if not conn:
         return None
     try:
         cur = conn.cursor()
 
-        # 1) Insert parent (submission)
+        # Parent row
         cur.execute(
             """
             INSERT INTO student_inputs
               (student_id, week_id,
                student_name, email, title, story,
                total_sentences, show_sentences, tell_sentences,
-               agreed_show, agreed_tell, disagreed_show, disagreed_tell,
                reflection, comments)
-            VALUES (%s, %s,
-                    %s, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, %s, %s,
                     %s, %s)
             """,
             (student_id, week_id,
              student_name, email, title, story,
              total, show, tell,
-             agreed_show, agreed_tell, disagreed_show, disagreed_tell,
              reflection, comments)
         )
         input_id = cur.lastrowid
 
-        # 2) Insert all sentences with week_id
+        # Sentence rows
         cur.executemany(
             """
             INSERT INTO student_sentences
               (input_id, week_id, sentence_idx, sentence_text, model_label, student_agree)
             VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            [(input_id, week_id, idx, text, label, agree) for (idx, text, label, agree) in sentence_rows]
+            [(input_id, week_id, idx, text, label, agree)
+             for (idx, text, label, agree) in sentence_rows]
         )
 
         conn.commit()
@@ -202,8 +215,7 @@ def insert_submission_and_sentences(
 # =========================
 # Email
 # =========================
-def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment,
-                        agreed_show, agreed_tell, disagreed_show, disagreed_tell):
+def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment):
     changed = sum(1 for item in feedback_list if not item["agree"])
     sentence_feedback = "🧾 Sentence-by-sentence feedback:\n"
     for item in feedback_list:
@@ -219,12 +231,6 @@ def send_feedback_email(email, student_name, title, summary, feedback_list, refl
 Dear {student_name},
 
 Thank you for submitting your data story titled "{title}". Our system analyzed your submission and identified a total of {summary["total_sentences"]} sentences. Of these, {summary["show_sentences"]} were categorized as 'Show' and {summary["tell_sentences"]} as 'Tell'. You disagreed with the model's classification on {changed} sentence(s).
-
-Your checkbox selections:
-• Agreed (Show): {agreed_show}
-• Agreed (Tell): {agreed_tell}
-• Disagreed (Show): {disagreed_show}
-• Disagreed (Tell): {disagreed_tell}
 
 Below is a detailed review of each sentence, showing how the model labeled it and whether you agreed:
 
@@ -264,11 +270,9 @@ st.write("---")
 DEFAULT_WEEK = 5
 CURRENT_WEEK_DEFAULT = int(os.getenv("CURRENT_WEEK") or get_secret("CURRENT_WEEK") or DEFAULT_WEEK)
 
-# store week once
 if "week_number" not in st.session_state:
     st.session_state.week_number = CURRENT_WEEK_DEFAULT
 
-# sidebar admin gate
 with st.sidebar:
     st.subheader("Admin")
     admin_ok = st.session_state.get("admin_ok", False)
@@ -280,7 +284,6 @@ with st.sidebar:
         else:
             st.error("Invalid key")
 
-# main area: week shown read-only unless admin
 if st.session_state.get("admin_ok"):
     st.session_state.week_number = st.number_input(
         "Week number (admin)",
@@ -290,9 +293,6 @@ if st.session_state.get("admin_ok"):
     )
 else:
     st.markdown(f"**Week:** {int(st.session_state.week_number)}")
-    # Alternative if you prefer the same widget but disabled:
-    # st.number_input("Week number", min_value=1, max_value=52,
-    #                 value=int(st.session_state.week_number), step=1, disabled=True)
 
 # ---------- Page routing ----------
 if "page" not in st.session_state:
@@ -312,11 +312,18 @@ if st.session_state.page == "input":
         if not student_name or not email or not title:
             st.error("Please fill in your name, email, and story title before continuing.")
         elif stories:
-            st.session_state.page = "results"
-            st.session_state.stories = stories
-            st.session_state.student_name = student_name
-            st.session_state.student_email = email
-            st.session_state.story_title = title
+            # Early block (optional): prevent doing analysis if already submitted
+            # Resolve identities just to check
+            _sid = get_or_create_student(student_name, email)
+            _wid = get_or_create_week(int(st.session_state.week_number))
+            if _sid and _wid and has_existing_submission(_sid, _wid):
+                st.error(f"You've already submitted for Week {int(st.session_state.week_number)}. Resubmissions are closed.")
+            else:
+                st.session_state.page = "results"
+                st.session_state.stories = stories
+                st.session_state.student_name = student_name
+                st.session_state.student_email = email
+                st.session_state.story_title = title
 
 # RESULTS
 if st.session_state.page == "results":
@@ -355,33 +362,21 @@ if st.session_state.page == "results":
             show += sum(1 for p in predictions if p == 0)
             tell += sum(1 for p in predictions if p == 1)
 
-        # Tallies by label
-        agreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and item["agree"])
-        agreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and item["agree"])
-        disagreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and not item["agree"])
-        disagreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and not item["agree"])
-
         # Persist in session
         st.session_state.student_feedback = feedback_data
         st.session_state.sentence_rows = sentence_rows
         st.session_state.total_sentences = total
         st.session_state.show_sentences = show
         st.session_state.tell_sentences = tell
-        st.session_state.agreed_show = agreed_show
-        st.session_state.agreed_tell = agreed_tell
-        st.session_state.disagreed_show = disagreed_show
-        st.session_state.disagreed_tell = disagreed_tell
 
         st.markdown("## Summary")
         st.write(f"Week: {week_number}")
         st.write(f"Total Sentences: {total}")
         st.write(f"Show Sentences: {show}")
         st.write(f"Tell Sentences: {tell}")
-        st.write(f"✔️ Agreed (Show): {agreed_show}")
-        st.write(f"✔️ Agreed (Tell): {agreed_tell}")
 
         fig, ax = plt.subplots()
-        ax.bar(["Show", "Tell"], [show, tell])  # no explicit colors -> matplotlib default
+        ax.bar(["Show", "Tell"], [show, tell])  # default colors
         ax.set_ylabel("Number of Sentences")
         ax.set_title("Show vs Tell Breakdown")
         st.pyplot(fig)
@@ -398,39 +393,38 @@ if st.session_state.page == "results":
         reflection = st.text_area("What did you learn from this feedback?", key="reflection")
 
         if st.button("Submit Feedback & Send Email"):
-            summary = {
-                "total_sentences": st.session_state.total_sentences,
-                "show_sentences": st.session_state.show_sentences,
-                "tell_sentences": st.session_state.tell_sentences,
-            }
-
             # Resolve identities
             student_id = get_or_create_student(name, email_addr)
             week_id = get_or_create_week(week_number)
             if not student_id or not week_id:
                 st.error("Could not resolve student/week. Aborting save.")
             else:
-                # Insert parent + sentences in one transaction
+                # 🔒 Disallow resubmission
+                if has_existing_submission(student_id, week_id):
+                    st.error(f"You've already submitted for Week {week_number}. Resubmissions are closed.")
+                    st.stop()
+
                 input_id = insert_submission_and_sentences(
                     student_id, week_id,
                     name, email_addr, story_title, st.session_state.stories[0],
-                    summary["total_sentences"], summary["show_sentences"], summary["tell_sentences"],
+                    st.session_state.total_sentences,
+                    st.session_state.show_sentences,
+                    st.session_state.tell_sentences,
                     reflection, st.session_state.common_reason,
-                    st.session_state.agreed_show, st.session_state.agreed_tell,
-                    st.session_state.disagreed_show, st.session_state.disagreed_tell,
                     st.session_state.sentence_rows
                 )
 
                 if input_id:
+                    summary = {
+                        "total_sentences": st.session_state.total_sentences,
+                        "show_sentences": st.session_state.show_sentences,
+                        "tell_sentences": st.session_state.tell_sentences,
+                    }
                     send_feedback_email(
                         email_addr, name, story_title, summary,
                         st.session_state.student_feedback,
                         reflection,
-                        st.session_state.common_reason,
-                        st.session_state.agreed_show,
-                        st.session_state.agreed_tell,
-                        st.session_state.disagreed_show,
-                        st.session_state.disagreed_tell
+                        st.session_state.common_reason
                     )
                     st.success(f" Feedback submitted (input_id={input_id}, week={week_number}) and email sent!")
                 else:

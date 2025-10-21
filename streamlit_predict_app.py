@@ -9,18 +9,10 @@ from email.message import EmailMessage
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # Download NLTK tokenizer
-
-# make sure path is: C:\Data_Story\AWS_SPRING\AWS_SPRING
-#  
-# Type this in terminal
-# python -m streamlit run streamlit_predict_app.py
-
 nltk.download("punkt")
 nltk.download("punkt_tab")
 
-# EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS") or st.secrets.get("EMAIL_ADDRESS")
-# EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD") or st.secrets.get("EMAIL_PASSWORD")
-
+# --- Secrets helper ---
 def get_secret(name: str):
     v = os.getenv(name)
     if v:
@@ -37,14 +29,6 @@ if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
     st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (16-char Gmail App Password) via env vars or .streamlit/secrets.toml.")
     st.stop()
 
-# EMAIL_ADDRESS = "studentfeedbacks44@gmail.com"
-# EMAIL_PASSWORD = "blueFire123#"
-# EMAIL_PASSWORD = "fhwezznkcxmxfxdo"
-#smtpbrzzAGP#$563
-#slonrzTBAu5641$#
-#omfl otsv sdqr qjos
-#uxkb crgw sbsx jjrh
-
 # --- Load model & vectorizer ---
 def load_model_and_vectorizer():
     try:
@@ -55,12 +39,12 @@ def load_model_and_vectorizer():
         st.error(f"❌ Model load error: {e}")
         st.stop()
 
-# --- Predict sentence labels
+# --- Predict sentence labels ---
 def predict_sentences(sentences, model, vectorizer):
     tokens = [" ".join(nltk.word_tokenize(s.lower())) for s in sentences]
     return model.predict(vectorizer.transform(tokens))
 
-# --- Connect to MySQL
+# --- Connect to MySQL ---
 def get_db_connection():
     try:
         return mysql.connector.connect(
@@ -75,21 +59,7 @@ def get_db_connection():
         st.error(f"Database Connection Error: {err}")
         return None
 
-# def get_db_connection():
-#     try:
-#         return mysql.connector.connect(
-#             host="localhost",
-#             user="root",
-#             password="slothFace@48",
-#             # password="Vigi@2004",
-#             database="Showtell",
-#             port=3306
-#         )
-#     except mysql.connector.Error as err:
-#         print("Database Connection Error:", err)
-#         return None
-
-# --- Insert into database
+# --- Insert into database (form-level only) ---
 def insert_student_data(student_name, email, title, story, total, show, tell, reflection, comments):
     conn = get_db_connection()
     if not conn:
@@ -97,9 +67,9 @@ def insert_student_data(student_name, email, title, story, total, show, tell, re
     try:
         cursor = conn.cursor()
         cursor.execute(
-            # "INSERT INTO student_inputs (name, email, title, story, total_sentences, show_sentences, tell_sentences, reflection, week, comments) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            # (name, email, title, story, total, show, tell, reflection, "Week 5", comments)
-            "INSERT INTO student_inputs (student_name, email, title, story, total_sentences, show_sentences, tell_sentences, reflection, week_number, comments) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "INSERT INTO student_inputs "
+            "(student_name, email, title, story, total_sentences, show_sentences, tell_sentences, reflection, week_number, comments) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (student_name, email, title, story, total, show, tell, reflection, "Week 5", comments)
         )
         conn.commit()
@@ -124,8 +94,9 @@ def count_rows():
         except:
             pass
 
-# --- Send feedback email
-def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment):
+# --- Send feedback email (now includes checkbox counts) ---
+def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment,
+                        agreed_show, agreed_tell, disagreed_show, disagreed_tell):
     changed = sum(1 for item in feedback_list if not item["agree"])
     sentence_feedback = "🧾 Sentence-by-sentence feedback:\n"
     for item in feedback_list:
@@ -135,13 +106,19 @@ def send_feedback_email(email, student_name, title, summary, feedback_list, refl
     # 1) Build the message
     msg = EmailMessage()
     msg["Subject"] = f"📊 Feedback for Your Data Story: {title}"
-    msg["From"] = EMAIL_ADDRESS          # must match the authenticated Gmail
+    msg["From"] = EMAIL_ADDRESS
     msg["To"] = email
     msg["Reply-To"] = EMAIL_ADDRESS
     msg.set_content(f"""
 Dear {student_name},
 
 Thank you for submitting your data story titled "{title}". Our system analyzed your submission and identified a total of {summary["total_sentences"]} sentences. Of these, {summary["show_sentences"]} were categorized as 'Show' and {summary["tell_sentences"]} as 'Tell'. You disagreed with the model's classification on {changed} sentence(s).
+
+Your checkbox selections:
+• Agreed (Show): {agreed_show}
+• Agreed (Tell): {agreed_tell}
+• Disagreed (Show): {disagreed_show}
+• Disagreed (Tell): {disagreed_tell}
 
 Below is a detailed review of each sentence, showing how the model labeled it and whether you agreed:
 
@@ -162,7 +139,7 @@ The Data Story Feedback Team
     # 2) Send it
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)  # 16-char Gmail App Password
+            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             smtp.send_message(msg)
         st.success(f"✅ Email sent to {email}")
     except smtplib.SMTPAuthenticationError as e:
@@ -172,10 +149,9 @@ The Data Story Feedback Team
         st.error("❌ Failed to send email.")
         st.exception(e)
 
-
 # --- Streamlit UI ---
 st.title("✨ Show or Tell Prediction App ✨")
-st.markdown("###Data Story Prompt")
+st.markdown("### Data Story Prompt")
 st.image("chart_prompt.png", caption="Use this chart to write your data story.")
 st.write("---")
 
@@ -211,9 +187,8 @@ if st.session_state.page == "results":
     model, vectorizer = load_model_and_vectorizer()
 
     if not st.session_state.analysis_done:
-        st.markdown("##Sentence Analysis")
+        st.markdown("## Sentence Analysis")
         feedback_data = []
-
         total = show = tell = 0
 
         for story in stories:
@@ -232,6 +207,19 @@ if st.session_state.page == "results":
             show += sum(1 for p in predictions if p == 0)
             tell += sum(1 for p in predictions if p == 1)
 
+        # ---- ⬇️ ADDITIONS: compute checkbox counts by label ⬇️ ----
+        agreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and item["agree"])
+        agreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and item["agree"])
+        disagreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and not item["agree"])
+        disagreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and not item["agree"])
+
+        # persist for next page / email
+        st.session_state.agreed_show = agreed_show
+        st.session_state.agreed_tell = agreed_tell
+        st.session_state.disagreed_show = disagreed_show
+        st.session_state.disagreed_tell = disagreed_tell
+        # ---- ⬆️ END ADDITIONS ⬆️ ----
+
         st.session_state.student_feedback = feedback_data
         st.session_state.total_sentences = total
         st.session_state.show_sentences = show
@@ -240,10 +228,14 @@ if st.session_state.page == "results":
         st.markdown("## Comment")
         st.session_state.common_reason = st.text_area("Add your thoughts or reasons for disagreement")
 
-        st.markdown("##Summary")
+        st.markdown("## Summary")
         st.write(f"Total Sentences: {total}")
         st.write(f"Show Sentences: {show}")
         st.write(f"Tell Sentences: {tell}")
+        st.write(f"✔️ Agreed (Show): {agreed_show}")
+        st.write(f"✔️ Agreed (Tell): {agreed_tell}")
+        # st.write(f"❌ Disagreed (Show): {disagreed_show}")
+        # st.write(f"❌ Disagreed (Tell): {disagreed_tell}")
 
         fig, ax = plt.subplots()
         ax.bar(["Show", "Tell"], [show, tell], color=["green", "red"])
@@ -256,7 +248,7 @@ if st.session_state.page == "results":
             st.session_state.feedback_complete = True
 
     elif st.session_state.get("feedback_complete"):
-        st.markdown("###Reflection")
+        st.markdown("### Reflection")
         reflection = st.text_area("What did you learn from this feedback?", key="reflection")
 
         if st.button("Submit Feedback & Send Email"):
@@ -277,7 +269,11 @@ if st.session_state.page == "results":
                 email, name, title, summary,
                 st.session_state.student_feedback,
                 reflection,
-                st.session_state.common_reason
+                st.session_state.common_reason,
+                st.session_state.agreed_show,
+                st.session_state.agreed_tell,
+                st.session_state.disagreed_show,
+                st.session_state.disagreed_tell
             )
             st.success(" Feedback submitted and email sent!")
 

@@ -1,18 +1,23 @@
-import streamlit as st
-import joblib
-import nltk
 import os
 import smtplib
 import mysql.connector
+import joblib
+import nltk
+import streamlit as st
 import matplotlib.pyplot as plt
 from email.message import EmailMessage
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# Download NLTK tokenizer
+# -------------------------
+# NLTK
+# -------------------------
 nltk.download("punkt")
+# if you installed punkt_tab locally, keep this; otherwise it's harmless
 nltk.download("punkt_tab")
 
-# --- Secrets helper ---
+# -------------------------
+# Secrets helper
+# -------------------------
 def get_secret(name: str):
     v = os.getenv(name)
     if v:
@@ -29,7 +34,9 @@ if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
     st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (16-char Gmail App Password) via env vars or .streamlit/secrets.toml.")
     st.stop()
 
-# --- Load model & vectorizer ---
+# -------------------------
+# Model + Vectorizer
+# -------------------------
 def load_model_and_vectorizer():
     try:
         model = joblib.load("LogisticRegression_All_shots_data_model.pkl")
@@ -39,12 +46,13 @@ def load_model_and_vectorizer():
         st.error(f"❌ Model load error: {e}")
         st.stop()
 
-# --- Predict sentence labels ---
 def predict_sentences(sentences, model, vectorizer):
     tokens = [" ".join(nltk.word_tokenize(s.lower())) for s in sentences]
     return model.predict(vectorizer.transform(tokens))
 
-# --- Connect to MySQL ---
+# -------------------------
+# DB
+# -------------------------
 def get_db_connection():
     try:
         return mysql.connector.connect(
@@ -53,48 +61,53 @@ def get_db_connection():
             database=st.secrets["DB_NAME"],
             user=st.secrets["DB_USER"],
             password=st.secrets["DB_PASSWORD"],
-            # later (recommended): ssl_ca="C:/path/to/rds-combined-ca-bundle.pem"
+            # ssl_ca="C:/path/to/rds-combined-ca-bundle.pem"  # recommended later
         )
     except mysql.connector.Error as err:
         st.error(f"Database Connection Error: {err}")
         return None
 
-# --- Insert into database (form-level only) ---
-def insert_student_data(student_name, email, title, story, total, show, tell, reflection, comments):
+def insert_student_data(student_name, email, title, story, total, show, tell,
+                        reflection, comments,
+                        agreed_show, agreed_tell, disagreed_show, disagreed_tell):
+    """
+    Inserts a single submission row into student_inputs including checkbox tallies.
+    """
     conn = get_db_connection()
     if not conn:
         return
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO student_inputs "
-            "(student_name, email, title, story, total_sentences, show_sentences, tell_sentences, reflection, week_number, comments) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (student_name, email, title, story, total, show, tell, reflection, "Week 5", comments)
+            """
+            INSERT INTO student_inputs
+              (student_name, email, title, story,
+               total_sentences, show_sentences, tell_sentences,
+               reflection, week_number, comments,
+               agreed_show, agreed_tell, disagreed_show, disagreed_tell)
+            VALUES (%s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s)
+            """,
+            (student_name, email, title, story,
+             total, show, tell,
+             reflection, "Week 5", comments,
+             agreed_show, agreed_tell, disagreed_show, disagreed_tell)
         )
         conn.commit()
-        cursor.close()
-        conn.close()
     except mysql.connector.Error as err:
-        print("⚠️ MySQL Error:", err)
-
-def count_rows():
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM student_inputs;")
-        n = cur.fetchone()[0]
-        return n
+        st.error(f"⚠️ MySQL Error: {err}")
     finally:
         try:
-            cur.close()
+            cursor.close()
             conn.close()
-        except:
+        except Exception:
             pass
 
-# --- Send feedback email (now includes checkbox counts) ---
+# -------------------------
+# Email
+# -------------------------
 def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment,
                         agreed_show, agreed_tell, disagreed_show, disagreed_tell):
     changed = sum(1 for item in feedback_list if not item["agree"])
@@ -103,7 +116,6 @@ def send_feedback_email(email, student_name, title, summary, feedback_list, refl
         status = "✅ Agreed" if item["agree"] else "❌ Did NOT agree"
         sentence_feedback += f"- [{item['label']}] {item['sentence']}\n  ➤ {status}\n\n"
 
-    # 1) Build the message
     msg = EmailMessage()
     msg["Subject"] = f"📊 Feedback for Your Data Story: {title}"
     msg["From"] = EMAIL_ADDRESS
@@ -130,13 +142,10 @@ Your comment:
 Your reflection:
 "{reflection if reflection else 'No reflection provided.'}"
 
-We appreciate your thoughtful participation and hope this feedback helps you enhance your data storytelling skills.
-
 Best regards,
 The Data Story Feedback Team
 """)
 
-    # 2) Send it
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -149,7 +158,9 @@ The Data Story Feedback Team
         st.error("❌ Failed to send email.")
         st.exception(e)
 
-# --- Streamlit UI ---
+# -------------------------
+# UI
+# -------------------------
 st.title("✨ Show or Tell Prediction App ✨")
 st.markdown("### Data Story Prompt")
 st.image("chart_prompt.png", caption="Use this chart to write your data story.")
@@ -160,7 +171,7 @@ if "page" not in st.session_state:
 if "analysis_done" not in st.session_state:
     st.session_state.analysis_done = False
 
-# --- INPUT PAGE ---
+# INPUT
 if st.session_state.page == "input":
     student_name = st.text_input("Enter your name:")
     email = st.text_input("Enter your email:")
@@ -178,12 +189,12 @@ if st.session_state.page == "input":
             st.session_state.student_email = email
             st.session_state.story_title = title
 
-# --- RESULTS PAGE ---
+# RESULTS
 if st.session_state.page == "results":
     stories = st.session_state.stories
     name = st.session_state.student_name
-    email = st.session_state.student_email
-    title = st.session_state.story_title
+    email_addr = st.session_state.student_email
+    story_title = st.session_state.story_title
     model, vectorizer = load_model_and_vectorizer()
 
     if not st.session_state.analysis_done:
@@ -199,7 +210,10 @@ if st.session_state.page == "results":
                 label_text = "Show" if label == 0 else "Tell"
                 color = "green" if label == 0 else "red"
 
-                st.markdown(f"<span style='color:{color}'><b>{label_text}:</b> {sent}</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='color:{color}'><b>{label_text}:</b> {sent}</span>",
+                    unsafe_allow_html=True
+                )
                 agree = st.checkbox("I agree with the model's label", key=f"agree_{i}")
                 feedback_data.append({"sentence": sent, "label": label_text, "agree": agree})
 
@@ -207,18 +221,17 @@ if st.session_state.page == "results":
             show += sum(1 for p in predictions if p == 0)
             tell += sum(1 for p in predictions if p == 1)
 
-        # ---- ⬇️ ADDITIONS: compute checkbox counts by label ⬇️ ----
+        # ---- compute checkbox tallies by label ----
         agreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and item["agree"])
         agreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and item["agree"])
         disagreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and not item["agree"])
         disagreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and not item["agree"])
 
-        # persist for next page / email
+        # persist for next page / email / insert
         st.session_state.agreed_show = agreed_show
         st.session_state.agreed_tell = agreed_tell
         st.session_state.disagreed_show = disagreed_show
         st.session_state.disagreed_tell = disagreed_tell
-        # ---- ⬆️ END ADDITIONS ⬆️ ----
 
         st.session_state.student_feedback = feedback_data
         st.session_state.total_sentences = total
@@ -257,16 +270,24 @@ if st.session_state.page == "results":
                 "show_sentences": st.session_state.show_sentences,
                 "tell_sentences": st.session_state.tell_sentences,
             }
+
+            # DB insert with checkbox tallies
             insert_student_data(
-                name, email, title, stories[0],
+                name, email_addr, story_title, stories[0],
                 summary["total_sentences"],
                 summary["show_sentences"],
                 summary["tell_sentences"],
                 reflection,
-                st.session_state.common_reason
+                st.session_state.common_reason,
+                st.session_state.agreed_show,
+                st.session_state.agreed_tell,
+                st.session_state.disagreed_show,
+                st.session_state.disagreed_tell
             )
+
+            # email (also shows tallies)
             send_feedback_email(
-                email, name, title, summary,
+                email_addr, name, story_title, summary,
                 st.session_state.student_feedback,
                 reflection,
                 st.session_state.common_reason,

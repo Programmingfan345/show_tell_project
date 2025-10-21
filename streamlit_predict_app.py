@@ -12,7 +12,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 # NLTK
 # -------------------------
 nltk.download("punkt")
-# if you installed punkt_tab locally, keep this; otherwise it's harmless
+# keep if you installed it; harmless if not present
 nltk.download("punkt_tab")
 
 # -------------------------
@@ -29,7 +29,6 @@ def get_secret(name: str):
 
 EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
 EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
-
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
     st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (16-char Gmail App Password) via env vars or .streamlit/secrets.toml.")
     st.stop()
@@ -61,46 +60,67 @@ def get_db_connection():
             database=st.secrets["DB_NAME"],
             user=st.secrets["DB_USER"],
             password=st.secrets["DB_PASSWORD"],
-            # ssl_ca="C:/path/to/rds-combined-ca-bundle.pem"  # recommended later
+            autocommit=False,  # we will manage transaction
         )
     except mysql.connector.Error as err:
         st.error(f"Database Connection Error: {err}")
         return None
 
-def insert_student_data(student_name, email, title, story, total, show, tell,
-                        reflection, comments,
-                        agreed_show, agreed_tell, disagreed_show, disagreed_tell):
+def insert_submission_and_sentences(
+    student_name, email, title, story,
+    total, show, tell, reflection, comments,
+    agreed_show, agreed_tell, disagreed_show, disagreed_tell,
+    sentence_rows  # list of tuples: (sentence_idx, sentence_text, model_label, student_agree_int)
+):
     """
-    Inserts a single submission row into student_inputs including checkbox tallies.
+    Inserts one row into student_inputs, then all related student_sentences rows.
+    Performs both in a single transaction. Returns input_id (int) on success.
     """
     conn = get_db_connection()
     if not conn:
-        return
+        return None
     try:
-        cursor = conn.cursor()
-        cursor.execute(
+        cur = conn.cursor()
+
+        # 1) Insert parent (submission)
+        cur.execute(
             """
             INSERT INTO student_inputs
               (student_name, email, title, story,
                total_sentences, show_sentences, tell_sentences,
-               reflection, week_number, comments,
-               agreed_show, agreed_tell, disagreed_show, disagreed_tell)
+               agreed_show, agreed_tell, disagreed_show, disagreed_tell,
+               reflection, week_number, comments)
             VALUES (%s, %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s, %s)
+                    %s, %s, %s, %s,
+                    %s, %s, %s)
             """,
             (student_name, email, title, story,
              total, show, tell,
-             reflection, "Week 5", comments,
-             agreed_show, agreed_tell, disagreed_show, disagreed_tell)
+             agreed_show, agreed_tell, disagreed_show, disagreed_tell,
+             reflection, "Week 5", comments)
         )
+        input_id = cur.lastrowid  # <-- FK for sentences
+
+        # 2) Insert all sentences (bulk)
+        cur.executemany(
+            """
+            INSERT INTO student_sentences
+              (input_id, sentence_idx, sentence_text, model_label, student_agree)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            [(input_id, idx, text, label, agree) for (idx, text, label, agree) in sentence_rows]
+        )
+
         conn.commit()
+        return input_id
     except mysql.connector.Error as err:
-        st.error(f"⚠️ MySQL Error: {err}")
+        conn.rollback()
+        st.error(f"⚠️ MySQL Error (rolled back): {err}")
+        return None
     finally:
         try:
-            cursor.close()
+            cur.close()
             conn.close()
         except Exception:
             pass
@@ -199,7 +219,8 @@ if st.session_state.page == "results":
 
     if not st.session_state.analysis_done:
         st.markdown("## Sentence Analysis")
-        feedback_data = []
+        feedback_data = []     # [{sentence, label, agree}]
+        sentence_rows = []     # [(idx, text, label, agree_int)] for DB
         total = show = tell = 0
 
         for story in stories:
@@ -215,28 +236,30 @@ if st.session_state.page == "results":
                     unsafe_allow_html=True
                 )
                 agree = st.checkbox("I agree with the model's label", key=f"agree_{i}")
+
                 feedback_data.append({"sentence": sent, "label": label_text, "agree": agree})
+                sentence_rows.append((i, sent, label_text, 1 if agree else 0))
 
             total += len(predictions)
             show += sum(1 for p in predictions if p == 0)
             tell += sum(1 for p in predictions if p == 1)
 
-        # ---- compute checkbox tallies by label ----
+        # Tallies by label
         agreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and item["agree"])
         agreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and item["agree"])
         disagreed_show = sum(1 for item in feedback_data if item["label"] == "Show" and not item["agree"])
         disagreed_tell = sum(1 for item in feedback_data if item["label"] == "Tell" and not item["agree"])
 
-        # persist for next page / email / insert
+        # Persist in session
+        st.session_state.student_feedback = feedback_data
+        st.session_state.sentence_rows = sentence_rows
+        st.session_state.total_sentences = total
+        st.session_state.show_sentences = show
+        st.session_state.tell_sentences = tell
         st.session_state.agreed_show = agreed_show
         st.session_state.agreed_tell = agreed_tell
         st.session_state.disagreed_show = disagreed_show
         st.session_state.disagreed_tell = disagreed_tell
-
-        st.session_state.student_feedback = feedback_data
-        st.session_state.total_sentences = total
-        st.session_state.show_sentences = show
-        st.session_state.tell_sentences = tell
 
         st.markdown("## Comment")
         st.session_state.common_reason = st.text_area("Add your thoughts or reasons for disagreement")
@@ -247,8 +270,6 @@ if st.session_state.page == "results":
         st.write(f"Tell Sentences: {tell}")
         st.write(f"✔️ Agreed (Show): {agreed_show}")
         st.write(f"✔️ Agreed (Tell): {agreed_tell}")
-        # st.write(f"❌ Disagreed (Show): {disagreed_show}")
-        # st.write(f"❌ Disagreed (Tell): {disagreed_tell}")
 
         fig, ax = plt.subplots()
         ax.bar(["Show", "Tell"], [show, tell], color=["green", "red"])
@@ -271,32 +292,30 @@ if st.session_state.page == "results":
                 "tell_sentences": st.session_state.tell_sentences,
             }
 
-            # DB insert with checkbox tallies
-            insert_student_data(
-                name, email_addr, story_title, stories[0],
-                summary["total_sentences"],
-                summary["show_sentences"],
-                summary["tell_sentences"],
-                reflection,
-                st.session_state.common_reason,
-                st.session_state.agreed_show,
-                st.session_state.agreed_tell,
-                st.session_state.disagreed_show,
-                st.session_state.disagreed_tell
+            # ⬇️ Insert parent + sentences in one transaction
+            input_id = insert_submission_and_sentences(
+                name, email_addr, story_title, st.session_state.stories[0],
+                summary["total_sentences"], summary["show_sentences"], summary["tell_sentences"],
+                reflection, st.session_state.common_reason,
+                st.session_state.agreed_show, st.session_state.agreed_tell,
+                st.session_state.disagreed_show, st.session_state.disagreed_tell,
+                st.session_state.sentence_rows
             )
 
-            # email (also shows tallies)
-            send_feedback_email(
-                email_addr, name, story_title, summary,
-                st.session_state.student_feedback,
-                reflection,
-                st.session_state.common_reason,
-                st.session_state.agreed_show,
-                st.session_state.agreed_tell,
-                st.session_state.disagreed_show,
-                st.session_state.disagreed_tell
-            )
-            st.success(" Feedback submitted and email sent!")
+            if input_id:
+                send_feedback_email(
+                    email_addr, name, story_title, summary,
+                    st.session_state.student_feedback,
+                    reflection,
+                    st.session_state.common_reason,
+                    st.session_state.agreed_show,
+                    st.session_state.agreed_tell,
+                    st.session_state.disagreed_show,
+                    st.session_state.disagreed_tell
+                )
+                st.success(f" Feedback submitted (input_id={input_id}) and email sent!")
+            else:
+                st.error("Could not save submission. Email not sent.")
 
         if st.button("Restart"):
             for key in list(st.session_state.keys()):

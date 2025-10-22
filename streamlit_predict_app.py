@@ -307,7 +307,7 @@ else:
 # =========================
 st.title("✨ Show or Tell Prediction App ✨")
 st.markdown("### Data Story Prompt")
-st.image("chart_prompt.png", caption="Use this chart to write your data story.")
+st.image("youtube_prompt.png", caption="Use this chart to write your data story.")
 st.write("---")
 
 if "page" not in st.session_state:
@@ -444,3 +444,4 @@ if st.session_state.page == "results":
         if st.button("Restart"):
             st.session_state.clear()
             st.rerun()
+

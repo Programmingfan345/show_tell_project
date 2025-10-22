@@ -21,16 +21,16 @@ except:
 # Secrets helper
 # =========================
 def get_secret(name: str):
-    # DO NOT read env here; step A = secrets-only for admin unlock
+    # secrets-only (no env override)
     try:
         return st.secrets[name]
     except Exception:
         return None
 
-EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
-EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
+EMAIL_ADDRESS = (get_secret("EMAIL_ADDRESS") or "").strip()
+EMAIL_PASSWORD = (get_secret("EMAIL_PASSWORD") or "").strip()
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in .streamlit/secrets.toml.")
+    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in Streamlit Secrets.")
     st.stop()
 
 # =========================
@@ -213,6 +213,13 @@ def insert_submission_and_sentences(
 # =========================
 # Email
 # =========================
+def _masked(s: str) -> str:
+    if not s: return ""
+    if "@" in s:
+        name, dom = s.split("@", 1)
+        return (name[:2] + "…" if len(name) > 2 else "…") + "@" + dom
+    return s[:2] + "…"
+
 def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment):
     changed = sum(1 for item in feedback_list if not item["agree"])
     details = "🧾 Sentence-by-sentence feedback:\n"
@@ -241,27 +248,25 @@ Best regards,
 The Data Story Feedback Team
 """)
 
+    # Login with Gmail App Password (16 chars)
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+            smtp.login(EMAIL_ADDRESS.strip(), EMAIL_PASSWORD.strip())
             smtp.send_message(msg)
         st.success(f"✅ Email sent to {email}")
     except smtplib.SMTPAuthenticationError as e:
-        st.error("❌ Gmail auth failed. Double-check the 16-char App Password (no spaces).")
-        st.exception(e)
+        st.error(
+            "❌ Gmail auth failed. Use a 16-char App Password (no spaces), "
+            "approve the security alert, or regenerate the app password."
+        )
+        st.caption(f"Login user: {_masked(EMAIL_ADDRESS)} | {e.smtp_error!r}")
     except Exception as e:
         st.error("❌ Failed to send email.")
         st.exception(e)
 
 # =========================
-# Admin-only week control (SECRETS-ONLY)
+# Admin + Week (initialize ONCE)
 # =========================
-def read_admin_key() -> str:
-    try:
-        return str(st.secrets.get("ADMIN_KEY", "") or "")
-    except Exception:
-        return ""
-
 def current_week_default() -> int:
     try:
         return int(st.secrets.get("CURRENT_WEEK", 5))
@@ -271,36 +276,28 @@ def current_week_default() -> int:
 if "admin_ok" not in st.session_state:
     st.session_state.admin_ok = False
 
-# Always resync week from secrets unless admin is unlocked
-if not st.session_state.get("admin_ok"):
+# ✅ Initialize the week ONCE per session; do NOT overwrite on every rerun
+if "week_number" not in st.session_state:
     st.session_state.week_number = current_week_default()
 
 with st.sidebar:
     st.subheader("Admin")
-    admin_key_input = st.text_input("Admin key", type="password")
-    c1, c2 = st.columns(2)
-    if c1.button("Unlock"):
-        expected = read_admin_key().strip()
+    admin_key_input = st.text_input("Admin key", type="password", key="admin_key")
+    col1, col2 = st.columns(2)
+    if col1.button("Unlock", key="unlock"):
+        expected = (st.secrets.get("ADMIN_KEY", "") or "").strip()
         entered = (admin_key_input or "").strip()
-        if not expected:
-            st.error("ADMIN_KEY missing in .streamlit/secrets.toml. Set it and restart the app.")
-        elif entered == expected:
-            st.session_state.admin_ok = True
-            st.success("Admin unlocked")
-        else:
-            st.session_state.admin_ok = False
-            st.error("Invalid key")
-    if c2.button("Lock"):
+        st.session_state.admin_ok = (expected != "" and entered == expected)
+        st.success("Admin unlocked" if st.session_state.admin_ok else "Invalid key")
+    if col2.button("Lock", key="lock"):
         st.session_state.admin_ok = False
         st.info("Admin locked")
 
-# Editable week only if unlocked
-if st.session_state.get("admin_ok"):
+# Editable only when unlocked
+if st.session_state.admin_ok:
     st.session_state.week_number = st.number_input(
-        "Week number (admin)",
-        min_value=1, max_value=52,
-        value=int(st.session_state.week_number),
-        step=1
+        "Week number (admin)", min_value=1, max_value=52,
+        value=int(st.session_state.week_number), step=1, key="week_number_input"
     )
 else:
     st.markdown(f"**Week:** {int(st.session_state.week_number)}")
@@ -330,7 +327,7 @@ if st.session_state.page == "input":
         if not student_name or not email or not title:
             st.error("Please fill in your name, email, and story title before continuing.")
         elif stories:
-            # Optional early block before analysis
+            # Pre-check duplicate for current week
             _sid = get_or_create_student(student_name, email)
             _wid = get_or_create_week(st.session_state.week_number)
             if _sid and _wid and has_existing_submission(_sid, _wid):

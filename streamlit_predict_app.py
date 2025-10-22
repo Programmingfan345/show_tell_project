@@ -21,9 +21,7 @@ except:
 # Secrets helper
 # =========================
 def get_secret(name: str):
-    v = os.getenv(name)
-    if v:
-        return v
+    # DO NOT read env here; step A = secrets-only for admin unlock
     try:
         return st.secrets[name]
     except Exception:
@@ -32,7 +30,7 @@ def get_secret(name: str):
 EMAIL_ADDRESS = get_secret("EMAIL_ADDRESS")
 EMAIL_PASSWORD = get_secret("EMAIL_PASSWORD")
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in env or .streamlit/secrets.toml.")
+    st.error("Email creds missing. Set EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail App Password) in .streamlit/secrets.toml.")
     st.stop()
 
 # =========================
@@ -163,7 +161,7 @@ def insert_submission_and_sentences(
     total, show, tell, reflection, comments,
     sentence_rows  # list of (sentence_idx, sentence_text, model_label, student_agree_int)
 ):
-    """Insert one parent row + all sentence rows. Assumes caller has already checked no existing submission."""
+    """Insert one parent row + all sentence rows. Caller must pre-check duplicates."""
     conn = get_db_connection()
     if not conn:
         return None
@@ -217,10 +215,10 @@ def insert_submission_and_sentences(
 # =========================
 def send_feedback_email(email, student_name, title, summary, feedback_list, reflection, comment):
     changed = sum(1 for item in feedback_list if not item["agree"])
-    sentence_feedback = "🧾 Sentence-by-sentence feedback:\n"
+    details = "🧾 Sentence-by-sentence feedback:\n"
     for item in feedback_list:
         status = "✅ Agreed" if item["agree"] else "❌ Did NOT agree"
-        sentence_feedback += f"- [{item['label']}] {item['sentence']}\n  ➤ {status}\n\n"
+        details += f"- [{item['label']}] {item['sentence']}\n  ➤ {status}\n\n"
 
     msg = EmailMessage()
     msg["Subject"] = f"📊 Feedback for Your Data Story: {title}"
@@ -232,10 +230,7 @@ Dear {student_name},
 
 Thank you for submitting your data story titled "{title}". Our system analyzed your submission and identified a total of {summary["total_sentences"]} sentences. Of these, {summary["show_sentences"]} were categorized as 'Show' and {summary["tell_sentences"]} as 'Tell'. You disagreed with the model's classification on {changed} sentence(s).
 
-Below is a detailed review of each sentence, showing how the model labeled it and whether you agreed:
-
-{sentence_feedback}
-
+{details}
 Your comment:
 "{comment if comment else 'No additional comment provided.'}"
 
@@ -259,31 +254,47 @@ The Data Story Feedback Team
         st.exception(e)
 
 # =========================
-# UI
+# Admin-only week control (SECRETS-ONLY)
 # =========================
-st.title("✨ Show or Tell Prediction App ✨")
-st.markdown("### Data Story Prompt")
-st.image("chart_prompt.png", caption="Use this chart to write your data story.")
-st.write("---")
+def read_admin_key() -> str:
+    try:
+        return str(st.secrets.get("ADMIN_KEY", "") or "")
+    except Exception:
+        return ""
 
-# ---------- Admin-only week control ----------
-DEFAULT_WEEK = 5
-CURRENT_WEEK_DEFAULT = int(os.getenv("CURRENT_WEEK") or get_secret("CURRENT_WEEK") or DEFAULT_WEEK)
+def current_week_default() -> int:
+    try:
+        return int(st.secrets.get("CURRENT_WEEK", 5))
+    except Exception:
+        return 5
 
-if "week_number" not in st.session_state:
-    st.session_state.week_number = CURRENT_WEEK_DEFAULT
+if "admin_ok" not in st.session_state:
+    st.session_state.admin_ok = False
+
+# Always resync week from secrets unless admin is unlocked
+if not st.session_state.get("admin_ok"):
+    st.session_state.week_number = current_week_default()
 
 with st.sidebar:
     st.subheader("Admin")
-    admin_ok = st.session_state.get("admin_ok", False)
-    admin_key = st.text_input("Admin key", type="password", placeholder="Enter key to unlock")
-    if st.button("Unlock"):
-        if admin_key and admin_key == get_secret("ADMIN_KEY"):
+    admin_key_input = st.text_input("Admin key", type="password")
+    c1, c2 = st.columns(2)
+    if c1.button("Unlock"):
+        expected = read_admin_key().strip()
+        entered = (admin_key_input or "").strip()
+        if not expected:
+            st.error("ADMIN_KEY missing in .streamlit/secrets.toml. Set it and restart the app.")
+        elif entered == expected:
             st.session_state.admin_ok = True
             st.success("Admin unlocked")
         else:
+            st.session_state.admin_ok = False
             st.error("Invalid key")
+    if c2.button("Lock"):
+        st.session_state.admin_ok = False
+        st.info("Admin locked")
 
+# Editable week only if unlocked
 if st.session_state.get("admin_ok"):
     st.session_state.week_number = st.number_input(
         "Week number (admin)",
@@ -294,7 +305,14 @@ if st.session_state.get("admin_ok"):
 else:
     st.markdown(f"**Week:** {int(st.session_state.week_number)}")
 
-# ---------- Page routing ----------
+# =========================
+# UI flow
+# =========================
+st.title("✨ Show or Tell Prediction App ✨")
+st.markdown("### Data Story Prompt")
+st.image("chart_prompt.png", caption="Use this chart to write your data story.")
+st.write("---")
+
 if "page" not in st.session_state:
     st.session_state.page = "input"
 if "analysis_done" not in st.session_state:
@@ -312,10 +330,9 @@ if st.session_state.page == "input":
         if not student_name or not email or not title:
             st.error("Please fill in your name, email, and story title before continuing.")
         elif stories:
-            # Early block (optional): prevent doing analysis if already submitted
-            # Resolve identities just to check
+            # Optional early block before analysis
             _sid = get_or_create_student(student_name, email)
-            _wid = get_or_create_week(int(st.session_state.week_number))
+            _wid = get_or_create_week(st.session_state.week_number)
             if _sid and _wid and has_existing_submission(_sid, _wid):
                 st.error(f"You've already submitted for Week {int(st.session_state.week_number)}. Resubmissions are closed.")
             else:
@@ -337,8 +354,7 @@ if st.session_state.page == "results":
 
     if not st.session_state.analysis_done:
         st.markdown("## Sentence Analysis")
-        feedback_data = []     # [{sentence, label, agree}]
-        sentence_rows = []     # [(idx, text, label, agree_int)] for DB
+        feedback_data, sentence_rows = [], []
         total = show = tell = 0
 
         for story in stories:
@@ -348,13 +364,11 @@ if st.session_state.page == "results":
             for i, (sent, label) in enumerate(zip(sentences, predictions)):
                 label_text = "Show" if label == 0 else "Tell"
                 color = "green" if label == 0 else "red"
-
                 st.markdown(
                     f"<span style='color:{color}'><b>{label_text}:</b> {sent}</span>",
                     unsafe_allow_html=True
                 )
                 agree = st.checkbox("I agree with the model's label", key=f"agree_{i}")
-
                 feedback_data.append({"sentence": sent, "label": label_text, "agree": agree})
                 sentence_rows.append((i, sent, label_text, 1 if agree else 0))
 
@@ -362,7 +376,7 @@ if st.session_state.page == "results":
             show += sum(1 for p in predictions if p == 0)
             tell += sum(1 for p in predictions if p == 1)
 
-        # Persist in session
+        # Persist
         st.session_state.student_feedback = feedback_data
         st.session_state.sentence_rows = sentence_rows
         st.session_state.total_sentences = total
@@ -431,6 +445,5 @@ if st.session_state.page == "results":
                     st.error("Could not save submission. Email not sent.")
 
         if st.button("Restart"):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            st.session_state.clear()
             st.rerun()

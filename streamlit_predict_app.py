@@ -437,11 +437,12 @@ if st.session_state.page == "results":
                         reflection,
                         st.session_state.common_reason
                     )
-                    st.success(f" Feedback submitted (input_id={input_id}, week={week_number}) and email sent!")
+                    st.success(" Feedback submitted and email sent!")
                 else:
                     st.error("Could not save submission. Email not sent.")
 
         if st.button("Restart"):
             st.session_state.clear()
             st.rerun()
+
 
